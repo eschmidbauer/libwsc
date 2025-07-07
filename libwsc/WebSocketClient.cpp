@@ -119,6 +119,8 @@ void WebSocketClient::connect() {
 
         ssl = SSL_new(ctx);
 
+        SSL_set_tlsext_host_name(ssl, host.c_str());
+
         if (!ssl) {
             SSL_CTX_free(ctx);
             log_error("SSL_new() failed");
