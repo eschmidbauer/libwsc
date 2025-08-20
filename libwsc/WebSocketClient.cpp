@@ -119,7 +119,6 @@ void WebSocketClient::connect() {
 
         ssl = SSL_new(ctx);
 
-        SSL_set_tlsext_host_name(ssl, host.c_str());
 
         if (!ssl) {
             SSL_CTX_free(ctx);
@@ -127,6 +126,8 @@ void WebSocketClient::connect() {
             sendError(ErrorCode::TLS_INIT_FAILED, "SSL context creation failed");
             return;
         }
+
+        SSL_set_tlsext_host_name(ssl, host.c_str());
 
         if (!tlsOptions.disableHostnameValidation) {
             X509_VERIFY_PARAM* param = SSL_get0_param(ssl);
