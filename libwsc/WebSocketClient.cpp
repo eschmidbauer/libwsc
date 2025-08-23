@@ -78,6 +78,38 @@ void WebSocketClient::setUrl(const std::string& url) {
     }
 
     uri = (path_pos == std::string::npos) ? "/" : url.substr(path_pos);
+
+    is_ip_address = isHostIPAddress(host);
+}
+
+/**
+ * \brief Check if the given host string is an IP address (IPv4 or IPv6)
+ * 
+ * \param host The host string to check
+ * \return true if host is an IP address, false if it's a domain name
+ */
+bool WebSocketClient::isHostIPAddress(const std::string& host) {
+    // Check for IPv4 address
+    struct in_addr addr4;
+    if (inet_pton(AF_INET, host.c_str(), &addr4) == 1) {
+        return true;
+    }
+    
+    // Check for IPv6 address (enclosed in brackets or not)
+    struct in6_addr addr6;
+    std::string host_clean = host;
+    
+    // Remove IPv6 brackets if present
+    if (host.size() >= 2 && host[0] == '[' && host[host.size()-1] == ']') {
+        host_clean = host.substr(1, host.size() - 2);
+    }
+    
+    if (inet_pton(AF_INET6, host_clean.c_str(), &addr6) == 1) {
+        return true;
+    }
+    
+    // If it's not a valid IP address, it's a domain name
+    return false;
 }
 
 /**
@@ -127,8 +159,10 @@ void WebSocketClient::connect() {
             return;
         }
 
-        SSL_set_tlsext_host_name(ssl, host.c_str());
-
+        if(!is_ip_address) {
+            SSL_set_tlsext_host_name(ssl, host.c_str());
+        }
+        
         if (!tlsOptions.disableHostnameValidation) {
             X509_VERIFY_PARAM* param = SSL_get0_param(ssl);
             if (param) {
@@ -1359,8 +1393,8 @@ void WebSocketClient::handleRead(bufferevent* bev) {
         size_t headerBytes = hdrend - (char*)buf + 4;  // \r\n\r\n
         std::string resp((char*)buf, headerBytes);
         
-        if (resp.rfind("HTTP/1.1 101", 0) != 0 ||
-            resp.find("Sec-WebSocket-Accept:") == std::string::npos)
+        if (resp.find("HTTP/1.1 101", 0) == std::string::npos ||
+            !containsHeader(resp, "Sec-WebSocket-Accept:"))
         {
             log_error("WebSocket upgrade failed");
             connection_state.store(ConnectionState::FAILED, std::memory_order_release);
@@ -1369,29 +1403,51 @@ void WebSocketClient::handleRead(bufferevent* bev) {
             return;
         }
 
-        const char* extPos = resp.find("Sec-WebSocket-Extensions:") != std::string::npos
-                           ? resp.c_str() + resp.find("Sec-WebSocket-Extensions:")
-                           : nullptr;
+        const char* extPos = nullptr;
+        std::string lowerResp = resp;
+        std::transform(lowerResp.begin(), lowerResp.end(), lowerResp.begin(), ::tolower);
+
+        size_t extHeaderPos = lowerResp.find("sec-websocket-extensions:");
+        if (extHeaderPos != std::string::npos) {
+            // Use the original response (with original case) but at the found position
+            extPos = resp.c_str() + extHeaderPos;
+        }
 
         bool negotiated = false;
         if (compression_requested && extPos) {
             const char* extEnd = strstr(extPos, "\r\n");
             std::string extLine(extPos, extEnd - extPos);
-            if (extLine.find("permessage-deflate") != std::string::npos) {
+            if (containsHeader(extLine, "permessage-deflate")) {
                 negotiated = true;
                 log_debug("Compression negotiated: %s", extLine.c_str());
 
                 // context-takeover
-                client_no_context_takeover = extLine.find("client_no_context_takeover") != std::string::npos;
-                server_no_context_takeover = extLine.find("server_no_context_takeover") != std::string::npos;
+                client_no_context_takeover = containsHeader(extLine, "client_no_context_takeover");
+                server_no_context_takeover = containsHeader(extLine, "server_no_context_takeover");
 
                 // max-window-bits
-                auto parseBits = [&](const std::string& key){
-                    auto p = extLine.find(key + "=");
+                auto parseBits = [&](const std::string& key) {
+                    // Convert to lowercase for case-insensitive search
+                    std::string lowerExtLine = extLine;
+                    std::transform(lowerExtLine.begin(), lowerExtLine.end(), lowerExtLine.begin(), ::tolower);
+                    std::string lowerKey = key + "=";
+                    
+                    auto p = lowerExtLine.find(lowerKey);
                     if (p == std::string::npos) return 15;
-                    int v = std::stoi(extLine.substr(p + key.size() + 1));
-                    return (v >= 8 && v <= 15) ? v : 15;
+                    
+                    // Extract the numeric value
+                    size_t valueStart = p + lowerKey.length();
+                    size_t valueEnd = lowerExtLine.find_first_of(" ;", valueStart);
+                    if (valueEnd == std::string::npos) valueEnd = lowerExtLine.length();
+                    
+                    try {
+                        int v = std::stoi(lowerExtLine.substr(valueStart, valueEnd - valueStart));
+                        return (v >= 8 && v <= 15) ? v : 15;
+                    } catch (...) {
+                        return 15;
+                    }
                 };
+
                 client_max_window_bits = parseBits("client_max_window_bits");
                 server_max_window_bits = parseBits("server_max_window_bits");
 
@@ -1448,6 +1504,23 @@ void WebSocketClient::handleRead(bufferevent* bev) {
  */
 void WebSocketClient::handleWrite(bufferevent* /*bev*/) {
     //log_debug("Write callback");
+}
+
+/**
+ * \brief Case insensitive header search
+ * \param response WebSocket response
+ * \param header Header to search for
+ * \returns bool
+ */
+bool WebSocketClient::containsHeader(const std::string& response, const std::string& header) const {
+    std::string lowerResponse = response;
+    std::string lowerHeader = header;
+    
+    // Convert both to lowercase for case-insensitive search
+    std::transform(lowerResponse.begin(), lowerResponse.end(), lowerResponse.begin(), ::tolower);
+    std::transform(lowerHeader.begin(), lowerHeader.end(), lowerHeader.begin(), ::tolower);
+    
+    return lowerResponse.find(lowerHeader) != std::string::npos;
 }
 
 /**

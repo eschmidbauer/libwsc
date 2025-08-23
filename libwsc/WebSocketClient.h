@@ -24,6 +24,7 @@
 #include <zlib.h>
 #include <iomanip>
 #include <condition_variable>
+#include <algorithm>
 
 #ifdef USE_TLS
     #include <openssl/ssl.h>
@@ -162,6 +163,7 @@ private:
     bool secure;
     std::string key;
     std::string accept;
+    bool is_ip_address;
 
     // Connection state
     std::atomic<bool> upgraded;
@@ -191,6 +193,8 @@ private:
     void send(evbuffer* buf, const void* data, size_t len, MessageType type = MessageType::TEXT);
     void receive(evbuffer* buf);
     bool isValidUtf8(const char *str, size_t len);
+    bool containsHeader(const std::string& response, const std::string& header) const;
+    bool isHostIPAddress(const std::string& host);
 
     // Static callbacks - these will be called by libevent
     static void readCallback(bufferevent* bev, void* ctx);
