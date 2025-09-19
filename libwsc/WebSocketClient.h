@@ -212,10 +212,10 @@ private:
     void handleWrite(bufferevent* bev);
     void handleEvent(bufferevent* bev, short events);
 
-    void handleContinuationFrame(unsigned char* data, size_t header_len, uint64_t payload_len, int fin);
-    void handleDataFrame(unsigned char* data, size_t header_len, uint64_t payload_len, int fin, int opcode, int rsv1);
-    void handleCloseFrame(unsigned char* data, size_t header_len, uint64_t payload_len);
-    void handlePingFrame(unsigned char* data, size_t header_len, uint64_t payload_len);
+    void handleContinuationFrame(const unsigned char* payload, size_t payload_len, bool fin);
+    void handleDataFrame(const unsigned char* payload, size_t payload_len, bool fin, int opcode, bool rsv1);
+    void handleCloseFrame(const unsigned char* payload, size_t payload_len);
+    void handlePingFrame(const unsigned char* payload, size_t payload_len);
     
     // WebSocket key
     std::array<uint8_t,20> hexToBytes(const std::string &hex);

@@ -863,22 +863,22 @@ void WebSocketClient::send(evbuffer* buf,
  *           to prevent reprocessing on next handleRead() invocation
  */
 void WebSocketClient::receive(evbuffer* buf) {
-    while (true) {
-        auto data_len = evbuffer_get_length(buf);
+    for (;;) {
+        const size_t data_len = evbuffer_get_length(buf);
         if (data_len < 2)
             break;
 
         // Peek at the header without pullup yet
         unsigned char hdr[14];
-        int peek_len = std::min(data_len, sizeof(hdr));
+        const size_t peek_len = std::min(data_len, sizeof(hdr));
         evbuffer_copyout(buf, hdr, peek_len);
 
-        int fin  = !!(hdr[0] & 0x80);
-        int rsv1 = !!(hdr[0] & 0x40);
-        int rsv2 = !!(hdr[0] & 0x20);
-        int rsv3 = !!(hdr[0] & 0x10);
-        int opcode = hdr[0] & 0x0F;
-        int mask = !!(hdr[1] & 0x80);
+        const bool fin  = !!(hdr[0] & 0x80);
+        const bool rsv1 = !!(hdr[0] & 0x40);
+        const bool rsv2 = !!(hdr[0] & 0x20);
+        const bool rsv3 = !!(hdr[0] & 0x10);
+        const int opcode = hdr[0] & 0x0F;
+        const bool mask = !!(hdr[1] & 0x80);
         uint64_t payload_len = hdr[1] & 0x7F;
 
         if ((!use_compression && rsv1) || rsv2 || rsv3) {
@@ -891,48 +891,55 @@ void WebSocketClient::receive(evbuffer* buf) {
             return;
         }
 
+        if (mask) {
+            close(CloseCode::PROTOCOL_ERROR, "Masked frame from server");
+            return;
+        }
+
         size_t header_len = 2;
 
         if (payload_len == 126) {
+            if (data_len < header_len + 2) break;
             header_len += 2;
-            if (data_len < header_len) break;
-            payload_len = ntohs(*(uint16_t*)&hdr[2]);
+            //payload_len = ntohs(*(uint16_t*)&hdr[2]);
+            uint16_t u16; std::memcpy(&u16, &hdr[2], sizeof(u16));
+            payload_len = ntohs(u16);
         } else if (payload_len == 127) {
+            if (data_len < header_len + 8) break;
             header_len += 8;
-            if (data_len < header_len) break;
-            payload_len = ntohll(*(uint64_t*)&hdr[2]);
+            //payload_len = ntohll(*(uint64_t*)&hdr[2]);
+            uint64_t u64; std::memcpy(&u64, &hdr[2], sizeof(u64));
+            payload_len = ntohll(u64);
         }
 
-        header_len += mask ? 4 : 0;
-
-        if (data_len < header_len + payload_len) {
+        const size_t need = header_len + static_cast<size_t>(payload_len);
+        if (data_len < /*header_len + payload_len*/need) {
             // Waiting for full frame
             break;
         }
 
-        // Pull the full frame and unmask
-        unsigned char* data = evbuffer_pullup(buf, header_len + payload_len);
-        if (mask) {
-            const unsigned char* mask_key = data + header_len - 4;
-            for (size_t i = 0; i < payload_len; i++)
-                data[header_len + i] ^= mask_key[i % 4];
-        }
+        // Pull the full frame
+        unsigned char* frame = evbuffer_pullup(buf, need);
+        // Payload pointer inside the pulled-up frame
+        const unsigned char* payload_ptr = frame + header_len;
+
+        std::vector<uint8_t> payload;
+        payload.reserve(static_cast<size_t>(payload_len));
+        payload.insert(payload.end(), payload_ptr, payload_ptr + static_cast<size_t>(payload_len));
 
         switch (opcode) {
             case 0x00:
-                handleContinuationFrame(data, header_len, payload_len, fin);
+                handleContinuationFrame(payload.data(), payload.size(), fin);
                 break;
             case 0x01:
-                handleDataFrame(data, header_len, payload_len, fin, opcode, rsv1);
-                break;
             case 0x02:
-                handleDataFrame(data, header_len, payload_len, fin, opcode, rsv1);
+                handleDataFrame(payload.data(), payload.size(), fin, opcode, rsv1);
                 break;
             case 0x08:
-                handleCloseFrame(data, header_len, payload_len);
+                handleCloseFrame(payload.data(), payload.size());
                 break;
             case 0x09:
-                handlePingFrame(data, header_len, payload_len);
+                handlePingFrame(payload.data(), payload.size());
                 break;
             case 0x0A:
                 log_debug("Received pong frame");
@@ -956,8 +963,7 @@ void WebSocketClient::receive(evbuffer* buf) {
  * 3. Performing incremental UTF-8 validation (for text messages)
  * 4. Finalizing message processing when FIN flag is set
  * 
- * \param data Raw frame data including header
- * \param header_len Header length (2-14 bytes)
+ * \param payload Pointer to the payload bytes
  * \param payload_len Payload length (may be 0)
  * \param fin FIN flag (1=final fragment)
  * 
@@ -970,7 +976,7 @@ void WebSocketClient::receive(evbuffer* buf) {
  * \see handleDataFrame() for initial fragment processing
  * \see decompressMessage() for compression handling
  */
-void WebSocketClient::handleContinuationFrame(unsigned char* data, size_t header_len, uint64_t payload_len, int fin) {
+void WebSocketClient::handleContinuationFrame(const unsigned char* payload, size_t payload_len, bool fin) {
     if (!message_in_progress) {
         log_error("Received continuation frame without initial frame");
         close(CloseCode::PROTOCOL_ERROR, "continuation frame without initial frame"); //POLICY_VIOLATION
@@ -979,77 +985,83 @@ void WebSocketClient::handleContinuationFrame(unsigned char* data, size_t header
         
     // Append this fragment to our accumulated message
     fragmented_message.insert(fragmented_message.end(), 
-                            data + header_len, 
-                            data + header_len + payload_len);
+                            payload,
+                            payload + payload_len);
 
     // Only validate UTF-8 if this is an uncompressed text message
     if (!compressed_message_in_progress && fragmented_opcode == 0x01) {
-        if (!utf8Validator.validateChunk(data + header_len, payload_len)) {
+        if (!utf8Validator.validateChunk(payload, payload_len)) {
             log_error("Invalid UTF-8 in continuation frame");
+            utf8Validator.reset();
             close(CloseCode::INVALID_PAYLOAD, "Invalid UTF-8 in text message");
             return;
         }
     }
-        
-    if (fin) {
-        // log_debug("Final fragment received, processing complete message");
-        if (compressed_message_in_progress) {
-            std::vector<uint8_t> output;
-            bool ok = decompressMessage(fragmented_message.data(), fragmented_message.size(), output);
+
+    if (!fin) return;
+
+    // log_debug("Final fragment received, processing complete message");
+    if (compressed_message_in_progress) {
+        std::vector<uint8_t> output;
+        bool ok = decompressMessage(fragmented_message.data(), fragmented_message.size(), output);
+        if (!ok) {
+            utf8Validator.reset();
+            close(CloseCode::INVALID_PAYLOAD, "Decompression failed");
+            return;
+        }
+        //fragmented_message = std::move(output);
+        fragmented_message.swap(output);
+    }
+
+    switch (fragmented_opcode) {
+        case 0x01: {
+            // Finalize the DFA
+            // For compressed text: we skipped chunk checks — validate now over the whole inflated buffer.
+            // For uncompressed text: we've streamed chunks — do a final boundary check.
+            bool ok = true;
+            if (compressed_message_in_progress) {
+                utf8Validator.reset();
+                ok = utf8Validator.validateChunk(fragmented_message.data(), fragmented_message.size())
+                  && utf8Validator.validateFinal();
+            } else {
+                ok = utf8Validator.validateFinal();
+            }
             if (!ok) {
-                close(CloseCode::INVALID_PAYLOAD, "Decompression failed");
+                log_error("Invalid UTF-8 at end of fragmented text");
+                utf8Validator.reset();
+                close(CloseCode::INVALID_PAYLOAD, "Invalid UTF-8 in text message");
                 return;
             }
-            fragmented_message = std::move(output);
-        }
 
-        switch (fragmented_opcode) {
-            case 0x01: {
-                // Finalize the DFA
-                if (!utf8Validator.validateFinal()) {
-                    log_error("Invalid UTF-8 at end of fragmented text");
-                    close(CloseCode::INVALID_PAYLOAD,
-                            "Invalid UTF-8 in text message");
-                    return;
-                }
-                std::string message(fragmented_message.begin(),
-                                    fragmented_message.end());
+            std::string message(fragmented_message.begin(), fragmented_message.end());
+            utf8Validator.reset();
 
-                utf8Validator.reset();
-                //log_debug("Received complete text message: %s", message.c_str());
-                MessageCallback callback;
-                {
-                    std::lock_guard<std::mutex> lock(callback_mutex);
-                    callback = message_callback;
-                }
-                
-                if (callback) {
-                    callback(message);
-                }
-                break;
-            }
-            case 0x02: {
-                //log_debug("Received complete binary message: %zu bytes", fragmented_message.size());
-                BinaryCallback callback;
-                {
-                    std::lock_guard<std::mutex> lock(callback_mutex);
-                    callback = binary_callback;
-                }
-                if (callback) {
-                    callback(fragmented_message.data(), fragmented_message.size());
-                }
-                break;
-            }
-            default:
-                log_error("Unknown fragmented opcode: %d", fragmented_opcode);
+            MessageCallback cb;
+            { std::lock_guard<std::mutex> lk(callback_mutex); cb = message_callback; }
+            if (cb) cb(message);
+            break;
         }
-        
-        // Reset fragmentation state
-        message_in_progress = false;
-        compressed_message_in_progress = false;
-        fragmented_message.clear();
-        fragmented_opcode = 0;
+        case 0x02: {
+            BinaryCallback callback;
+            {
+                std::lock_guard<std::mutex> lock(callback_mutex);
+                callback = binary_callback;
+            }
+            if (callback) {
+                callback(fragmented_message.data(), fragmented_message.size());
+            }
+            break;
+        }
+        default:
+            log_error("Unknown fragmented opcode: %d", fragmented_opcode);
     }
+
+    // Reset fragmentation state
+    message_in_progress = false;
+    compressed_message_in_progress = false;
+    //fragmented_message.clear();
+    std::vector<uint8_t>().swap(fragmented_message); // frees capacity
+    fragmented_opcode = 0;
 }
 
 /**
@@ -1061,8 +1073,7 @@ void WebSocketClient::handleContinuationFrame(unsigned char* data, size_t header
  * - Payload decompression (permessage-deflate)
  * - Callback dispatching
  * 
- * \param data Raw frame data including header
- * \param header_len Header length (2-14 bytes)
+ * \param payload Pointer to the payload bytes
  * \param payload_len Payload length (may be 0)
  * \param fin FIN flag (1=final fragment)
  * \param opcode Frame type (0x1=text, 0x2=binary, 0x0=continuation)
@@ -1083,83 +1094,87 @@ void WebSocketClient::handleContinuationFrame(unsigned char* data, size_t header
  * \see validateChunk() for incremental UTF-8 checking
  * \see decompressMessage() for compression handling
  */
-void WebSocketClient::handleDataFrame(unsigned char* data, size_t header_len, uint64_t payload_len, int fin, int opcode, int rsv1) {
+void WebSocketClient::handleDataFrame(const unsigned char* payload, size_t payload_len, bool fin, int opcode, bool rsv1) {
     if (message_in_progress) {
         log_error("Received new data frame (opcode %d) while expecting a continuation frame. Closing connection.", opcode);
         close(CloseCode::PROTOCOL_ERROR, "Received new data frame when expecting continuation frame.");
         return;
     }
 
+    const bool compressed = (rsv1 && use_compression && inflate_initialized);
+
     if (!fin) {
         // Start of a fragmented message
         message_in_progress = true;
         fragmented_opcode = opcode;
-        fragmented_message.assign(data + header_len, data + header_len + payload_len);
-        if (rsv1 && use_compression && inflate_initialized) {
-            compressed_message_in_progress = true;
-        }
+        fragmented_message.assign(payload, payload + payload_len);
+
+        compressed_message_in_progress = compressed;
 
         if (opcode == 0x01 && !compressed_message_in_progress) {
             // Reset DFA for new text message
             utf8Validator.reset();
             // Validate this first chunk
-            if (!utf8Validator.validateChunk(data + header_len,
-                                                payload_len)) {
+            if (!utf8Validator.validateChunk(payload, payload_len)) {
                 log_error("Invalid UTF-8 in initial fragment");
+                utf8Validator.reset();
                 close(CloseCode::INVALID_PAYLOAD,
                         "Invalid UTF-8 in text message");
                 return;
             }
         }
-        //log_debug("Started fragmented message, opcode: %d, fragment size: %ld", opcode, payload_len);
-    } else {
-        // Single unfragmented message
-        const uint8_t* msg_data = data + header_len;
-        size_t msg_len = payload_len;
-        std::vector<uint8_t> decompressed;
+        return;
+    }
 
-        if (rsv1 && use_compression && inflate_initialized) {
-            bool ok = decompressMessage(msg_data, msg_len, decompressed);
-            if (!ok) {
-                close(CloseCode::INVALID_PAYLOAD, "Decompression failed");
-                return;
-            }
-            msg_data = decompressed.data();
-            msg_len  = decompressed.size();
+    // Single unfragmented message
+    const uint8_t* msg_data = payload;
+    size_t msg_len = payload_len;
+    std::vector<uint8_t> decompressed;
+
+    if (compressed) {
+        bool ok = decompressMessage(msg_data, msg_len, decompressed);
+        if (!ok) {
+            close(CloseCode::INVALID_PAYLOAD, "Decompression failed");
+            return;
         }
+        msg_data = decompressed.data();
+        msg_len  = decompressed.size();
+    }
 
-        if (opcode == 0x01) {
-            // Complete single‐frame message
+    if (opcode == 0x01) {
+        // Complete single‐frame message
+        utf8Validator.reset();
+        if (!utf8Validator.validateChunk(msg_data, msg_len) ||
+            !utf8Validator.validateFinal()) {
+            log_error("Invalid UTF-8 in unfragmented text");
             utf8Validator.reset();
-            if (!utf8Validator.validateChunk(msg_data, msg_len) ||
-                !utf8Validator.validateFinal()) {
-                log_error("Invalid UTF-8 in unfragmented text");
-                close(CloseCode::INVALID_PAYLOAD,
-                        "Invalid UTF-8 in text message");
-                return;
-            }
-
-            std::string message((char*)msg_data, msg_len);
-            // log_debug("Received message: %s", message.c_str());
-            MessageCallback callback;
-            {
-                std::lock_guard<std::mutex> lock(callback_mutex);
-                callback = message_callback;
-            }
-            if (callback) {
-                callback(message);
-            }
-        } else {
-            // log_debug("Received binary message: %ld bytes", payload_len);
-            BinaryCallback callback;
-            {
-                std::lock_guard<std::mutex> lock(callback_mutex);
-                callback = binary_callback;
-            }
-            if (callback) {
-                callback(msg_data, msg_len);
-            }
+            close(CloseCode::INVALID_PAYLOAD,
+                    "Invalid UTF-8 in text message");
+            return;
         }
+
+        std::string message(reinterpret_cast<const char*>(msg_data), msg_len);
+        MessageCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex);
+            callback = message_callback;
+        }
+        if (callback) {
+            callback(message);
+        }
+    } else if (opcode == 0x02) {
+        BinaryCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex);
+            callback = binary_callback;
+        }
+        if (callback) {
+            callback(msg_data, msg_len);
+        }
+    } else {
+        log_error("Unsupported data opcode: %d", opcode);
+        close(CloseCode::PROTOCOL_ERROR, "Unsupported opcode");
+        return;
     }
 }
 
@@ -1174,8 +1189,7 @@ void WebSocketClient::handleDataFrame(unsigned char* data, size_t header_len, ui
  * 
  * 3. Sending appropriate CLOSE frame response
  * 
- * \param data Raw frame data including header
- * \param header_len Frame header length (2-14 bytes)
+ * \param payload Pointer to the payload bytes
  * \param payload_len Close payload length (0-125 bytes)
  * 
  * \note Implements RFC 6455 sections:
@@ -1192,75 +1206,77 @@ void WebSocketClient::handleDataFrame(unsigned char* data, size_t header_len, ui
  *          - Uses mutex for callback access
  *          - Locks bufferevent for output
  */
-void WebSocketClient::handleCloseFrame(unsigned char* data, size_t header_len, uint64_t payload_len) {
-    log_debug("Received close frame");
-
-    //got_remote_close = true;
+void WebSocketClient::handleCloseFrame(const unsigned char* payload, size_t payload_len) {
+    //log_debug("Received close frame");
     {
       std::lock_guard<std::mutex> lk(state_mutex);
       got_remote_close = true;
     }
     state_cv.notify_one();
 
-    if (!sent_close) {
-        uint16_t close_code = 1000;
-        std::string close_reason;
-        bool protocol_error = false;
+    if (sent_close) return;
 
-        // RFC 6455 Section 5.5.1
-        if (payload_len > 125) {
-            log_error("Close frame too large (%zu bytes)", payload_len);
+    uint16_t close_code = 1000;
+    std::string close_reason;
+    bool protocol_error = false;
+
+    // RFC 6455 Section 5.5.1
+    if (payload_len > 125) {
+        log_error("Close frame too large (%zu bytes)", payload_len);
+        close_code = 1002;
+        protocol_error = true;
+    }
+    else if (payload_len == 1) {
+        log_error("Invalid close frame: payload length is 1 (must be 0 or >=2)");
+        close_code = 1002;
+        protocol_error = true;
+    }
+    else if (payload_len >= 2) {
+        // Extract close code (avoid unaligned access)
+        uint16_t net;
+        std::memcpy(&net, payload, 2);
+        uint16_t received = ntohs(net);
+        close_code = received;
+
+        // RFC 6455 section 7.4.1
+        if (!((close_code >= 1000 && close_code <= 1011 &&
+            close_code != 1004 && close_code != 1005 && close_code != 1006) ||
+            (close_code >= 3000 && close_code <= 4999))) {
+            log_error("Received invalid close code: %d", close_code);
             close_code = 1002;
             protocol_error = true;
         }
-        else if (payload_len == 1) {
-            log_error("Invalid close frame: payload length is 1 (must be 0 or >=2)");
-            close_code = 1002;
-            protocol_error = true;
-        }
-        else if (payload_len >= 2) {
-            // Extract close code (avoid unaligned access)
-            uint16_t received_code;
-            memcpy(&received_code, data + header_len, 2);
-            close_code = ntohs(received_code);
 
-            // RFC 6455 section 7.4.1
-            if (!((close_code >= 1000 && close_code <= 1011 && 
-                close_code != 1004 && close_code != 1005 && close_code != 1006) ||
-                (close_code >= 3000 && close_code <= 4999))) {
-                log_error("Received invalid close code: %d", close_code);
+        // Process close reason if present
+        if (payload_len > 2) {
+            const char* reason_ptr = reinterpret_cast<const char*>(payload + 2);
+            size_t reason_len = payload_len - 2;
+            if (reason_len > 123) reason_len = 123;  // RFC limit
+
+            if (!isValidUtf8(reason_ptr, reason_len)) {
+                log_error("Close reason is not valid UTF-8");
                 close_code = 1002;
                 protocol_error = true;
-            }
-
-            // Process close reason if present
-            if (payload_len > 2) {
-                const char* reason_ptr = (const char*)(data + header_len + 2);
-                size_t reason_len = std::min(payload_len - 2, (size_t)123);  // RFC limit
-
-                if (!isValidUtf8(reason_ptr, reason_len)) {
-                    log_error("Close reason is not valid UTF-8");
-                    close_code = 1002;
-                    protocol_error = true;
-                } else {
-                    close_reason.assign(reason_ptr, reason_len);
-                }
+            } else {
+                close_reason.assign(reason_ptr, reason_len);
             }
         }
-
-        CloseCallback callback;
-        {
-            std::lock_guard<std::mutex> lock(callback_mutex);
-            callback = close_callback;
-        }
-        if (callback) {
-            callback(close_code, protocol_error ? "Protocol error" : close_reason);
-        }
-
-        int reply_code = protocol_error ? 1002 : static_cast<int>(close_code);
-        std::string reply_reason = protocol_error ? "" : close_reason;
-        close(reply_code, reply_reason);
     }
+
+    CloseCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        callback = close_callback;
+    }
+    if (callback) {
+        //callback(close_code, protocol_error ? "Protocol error" : close_reason);
+        callback(protocol_error ? 1002 : static_cast<int>(close_code),
+                 protocol_error ? "Protocol error" : close_reason);
+    }
+
+    const int reply_code = protocol_error ? 1002 : static_cast<int>(close_code);
+    const std::string reply_reason = protocol_error ? "" : close_reason;
+    close(reply_code, reply_reason);
 }
 
 /**
@@ -1270,8 +1286,7 @@ void WebSocketClient::handleCloseFrame(unsigned char* data, size_t header_len, u
  * responds with a PONG containing the same payload. Thread-safely accesses
  * the output buffer using libevent locking.
  * 
- * \param data Raw frame data (including header)
- * \param header_len Size of frame header (2-14 bytes)
+ * \param payload Pointer to the ping payload bytes (may be empty)
  * \param payload_len Length of ping payload (must be ≤125 bytes)
  * 
  * \warning Closes connection with PROTOCOL_ERROR if:
@@ -1280,11 +1295,16 @@ void WebSocketClient::handleCloseFrame(unsigned char* data, size_t header_len, u
  * 
  * \see RFC 6455 Section 5.5.2 (PING/PONG Control Frames)
  */
-void WebSocketClient::handlePingFrame(unsigned char* data, size_t header_len, uint64_t payload_len) {
-    log_debug("Received ping frame");
+void WebSocketClient::handlePingFrame(const unsigned char* payload, size_t payload_len) {
+    //log_debug("Received ping frame");
     if (payload_len > 125) {
         log_error("Protocol violation: received ping frame with payload length > 125 bytes");            
         close(CloseCode::PROTOCOL_ERROR, "Control frame payload too large");            
+        return;
+    }
+
+    if (!m_bev) {
+        log_error("Bufferevent is null");
         return;
     }
 
@@ -1293,9 +1313,9 @@ void WebSocketClient::handlePingFrame(unsigned char* data, size_t header_len, ui
     evbuffer *output = bufferevent_get_output(m_bev);
     if (output) {
         send(output,
-        data + header_len,
-        payload_len,
-        MessageType::PONG);
+            payload,
+            payload_len,
+            MessageType::PONG);
     } else {
         log_error("Cannot get output buffer");
     }
@@ -1380,19 +1400,28 @@ void WebSocketClient::sendPing() {
  */
 void WebSocketClient::handleRead(bufferevent* bev) {
     //log_debug("Read callback");
-    auto input = bufferevent_get_input(bev);
+    evbuffer* input = bufferevent_get_input(bev);
+
     if (!upgraded.load()) {
         
-        size_t len     = evbuffer_get_length(input);
-        unsigned char* buf = evbuffer_pullup(input, len);
-        const char* hdrend = strstr((char*)buf, "\r\n\r\n");
-        if (!hdrend) {
-            return;
-        }
+        const size_t len = evbuffer_get_length(input);
+        if (len < 4) return;
+
+        std::vector<char> snap(len);
+        evbuffer_copyout(input, snap.data(), len);
+        const char* b = snap.data();
             
-        size_t headerBytes = hdrend - (char*)buf + 4;  // \r\n\r\n
-        std::string resp((char*)buf, headerBytes);
-        
+        // Find end of headers: "\r\n\r\n" (length-bounded)
+        size_t headerBytes = 0;
+        for (size_t i = 0; i + 3 < len; ++i) {
+            if (b[i] == '\r' && b[i+1] == '\n' && b[i+2] == '\r' && b[i+3] == '\n') {
+                headerBytes = i + 4;
+                break;
+            }
+        }
+        if (headerBytes == 0) return;
+        std::string resp(b, headerBytes);
+
         if (resp.find("HTTP/1.1 101", 0) == std::string::npos ||
             !containsHeader(resp, "Sec-WebSocket-Accept:"))
         {
@@ -1403,61 +1432,53 @@ void WebSocketClient::handleRead(bufferevent* bev) {
             return;
         }
 
-        const char* extPos = nullptr;
-        std::string lowerResp = resp;
-        std::transform(lowerResp.begin(), lowerResp.end(), lowerResp.begin(), ::tolower);
-
-        size_t extHeaderPos = lowerResp.find("sec-websocket-extensions:");
-        if (extHeaderPos != std::string::npos) {
-            // Use the original response (with original case) but at the found position
-            extPos = resp.c_str() + extHeaderPos;
-        }
-
         bool negotiated = false;
-        if (compression_requested && extPos) {
-            const char* extEnd = strstr(extPos, "\r\n");
-            std::string extLine(extPos, extEnd - extPos);
-            if (containsHeader(extLine, "permessage-deflate")) {
-                negotiated = true;
-                log_debug("Compression negotiated: %s", extLine.c_str());
+        if (compression_requested) {
+            std::string lowerResp = resp;
+            std::transform(lowerResp.begin(), lowerResp.end(), lowerResp.begin(), ::tolower);
+            const std::string key = "sec-websocket-extensions:";
+            size_t extHeaderPos = lowerResp.find(key);
+            if (extHeaderPos != std::string::npos) {
+                size_t lineEnd = resp.find("\r\n", extHeaderPos);
+                if (lineEnd == std::string::npos) lineEnd = resp.size();
+                std::string extLine = resp.substr(extHeaderPos, lineEnd - extHeaderPos);
 
-                // context-takeover
-                client_no_context_takeover = containsHeader(extLine, "client_no_context_takeover");
-                server_no_context_takeover = containsHeader(extLine, "server_no_context_takeover");
+                if (containsHeader(extLine, "permessage-deflate")) {
+                    negotiated = true;
+                    log_debug("Compression negotiated: %s", extLine.c_str());
 
-                // max-window-bits
-                auto parseBits = [&](const std::string& key) {
-                    // Convert to lowercase for case-insensitive search
-                    std::string lowerExtLine = extLine;
-                    std::transform(lowerExtLine.begin(), lowerExtLine.end(), lowerExtLine.begin(), ::tolower);
-                    std::string lowerKey = key + "=";
-                    
-                    auto p = lowerExtLine.find(lowerKey);
-                    if (p == std::string::npos) return 15;
-                    
-                    // Extract the numeric value
-                    size_t valueStart = p + lowerKey.length();
-                    size_t valueEnd = lowerExtLine.find_first_of(" ;", valueStart);
-                    if (valueEnd == std::string::npos) valueEnd = lowerExtLine.length();
-                    
-                    try {
-                        int v = std::stoi(lowerExtLine.substr(valueStart, valueEnd - valueStart));
-                        return (v >= 8 && v <= 15) ? v : 15;
-                    } catch (...) {
-                        return 15;
+                    auto hasToken = [](const std::string& s, const char* tok) {
+                        std::string ls = s;
+                        std::transform(ls.begin(), ls.end(), ls.begin(), ::tolower);
+                        return ls.find(tok) != std::string::npos;
+                    };
+                    auto parseBits = [&](const std::string& keyName) {
+                        std::string ls = extLine;
+                        std::transform(ls.begin(), ls.end(), ls.begin(), ::tolower);
+                        std::string needle = keyName + "=";
+                        size_t p = ls.find(needle);
+                        if (p == std::string::npos) return 15;
+                        size_t vstart = p + needle.size();
+                        size_t vend = ls.find_first_of(" ;\r\n", vstart);
+                        if (vend == std::string::npos) vend = ls.size();
+                        try {
+                            int v = std::stoi(ls.substr(vstart, vend - vstart));
+                            return (v >= 8 && v <= 15) ? v : 15;
+                        } catch (...) { return 15; }
+                    };
+
+                    client_no_context_takeover = hasToken(extLine, "client_no_context_takeover");
+                    server_no_context_takeover = hasToken(extLine, "server_no_context_takeover");
+                    client_max_window_bits = parseBits("client_max_window_bits");
+                    server_max_window_bits = parseBits("server_max_window_bits");
+
+                    if (!initializeCompression()) {
+                        log_error("Failed to initialize compression");
+                        use_compression = false;
+                        sendError(ErrorCode::NOT_SUPPORTED, "Compression negotiation failed");
+                    } else {
+                        use_compression = true;
                     }
-                };
-
-                client_max_window_bits = parseBits("client_max_window_bits");
-                server_max_window_bits = parseBits("server_max_window_bits");
-
-                // initialize zlib streams with negotiated bits
-                if (!initializeCompression()) {
-                    log_error("Failed to initialize compression");
-                    use_compression = false;
-                    sendError(ErrorCode::NOT_SUPPORTED, "Compression negotiation failed");
-                } else {
-                    use_compression = true;
                 }
             }
         }

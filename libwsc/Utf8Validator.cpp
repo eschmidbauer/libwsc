@@ -126,5 +126,5 @@ bool Utf8Validator::validateFinal() const {
  */
 void Utf8Validator::reset() {
     expectedContinuation = 0;
-    seenF4 = seenED = false;
+    seenE0 = seenED = seenF0 = seenF4 = false;
 }
