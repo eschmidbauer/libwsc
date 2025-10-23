@@ -19,7 +19,8 @@
  * \note For HTTP/WebSocket compliance, header fields should be compared
  * case-insensitively according to RFC 6455, though storage is case-sensitive.
  */
-struct WebSocketHeaders {
+struct WebSocketHeaders
+{
     std::map<std::string, std::string> headers; ///< Internal storage of header key-value pairs
 
     /**
@@ -28,7 +29,8 @@ struct WebSocketHeaders {
      * \param value The header field value
      * \note Overwrites any existing value for the key
      */
-    void set(const std::string& key, const std::string& value) {
+    void set(const std::string &key, const std::string &value)
+    {
         headers[key] = value;
     }
 
@@ -37,14 +39,16 @@ struct WebSocketHeaders {
      * \param key The header field name to remove
      * \return Number of elements removed (0 or 1)
      */
-    void remove(const std::string& key) {
+    void remove(const std::string &key)
+    {
         headers.erase(key);
     }
 
     /**
      * \brief Remove all headers
      */
-    void clear() {
+    void clear()
+    {
         headers.clear();
     }
 
@@ -52,7 +56,8 @@ struct WebSocketHeaders {
      * \brief Check if no headers are present
      * \return true if container is empty, false otherwise
      */
-    bool empty() const {
+    bool empty() const
+    {
         return headers.empty();
     }
 
@@ -61,7 +66,8 @@ struct WebSocketHeaders {
      * \return Const reference to the underlying map container
      * \warning Do not use this to modify headers - use set() instead
      */
-    const std::map<std::string, std::string>& all() const {
+    const std::map<std::string, std::string> &all() const
+    {
         return headers;
     }
 };

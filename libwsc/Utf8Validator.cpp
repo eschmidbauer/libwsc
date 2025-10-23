@@ -7,9 +7,9 @@
 #include "Utf8Validator.h"
 
 Utf8Validator::Utf8Validator()
-        : expectedContinuation(0),
-            seenE0(false), seenED(false),
-            seenF0(false), seenF4(false) {};
+    : expectedContinuation(0),
+      seenE0(false), seenED(false),
+      seenF0(false), seenF4(false) {};
 
 /**
  * \brief Validate a chunk of UTF-8 encoded data.
@@ -47,53 +47,70 @@ Utf8Validator::Utf8Validator()
  *    - Decrement continuation count
  *    - Clear flags when sequence completes
  */
-bool Utf8Validator::validateChunk(const uint8_t* data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
+bool Utf8Validator::validateChunk(const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len; ++i)
+    {
         uint8_t b = data[i];
-        if (expectedContinuation == 0) {
-            if (b < 0x80) {
+        if (expectedContinuation == 0)
+        {
+            if (b < 0x80)
+            {
                 continue;
             }
-            else if ((b >> 5) == 0x6) {
-                if (b < 0xC2 || b > 0xDF) return false;
+            else if ((b >> 5) == 0x6)
+            {
+                if (b < 0xC2 || b > 0xDF)
+                    return false;
                 expectedContinuation = 1;
             }
-            else if ((b >> 4) == 0xE) {
+            else if ((b >> 4) == 0xE)
+            {
                 seenE0 = (b == 0xE0);
                 seenED = (b == 0xED);
                 expectedContinuation = 2;
             }
-            else if ((b >> 3) == 0x1E) {
+            else if ((b >> 3) == 0x1E)
+            {
                 seenF0 = (b == 0xF0);
                 seenF4 = (b == 0xF4);
                 // allow only up to F4
-                if (b < 0xF0 || b > 0xF4) return false;
+                if (b < 0xF0 || b > 0xF4)
+                    return false;
                 expectedContinuation = 3;
             }
-            else {
+            else
+            {
                 return false;
             }
         }
-        else {
+        else
+        {
             // Continuation byte
-            if ((b >> 6) != 0x2) {
+            if ((b >> 6) != 0x2)
+            {
                 return false;
             }
-            if (seenE0 && expectedContinuation == 2 && b < 0xA0) {
+            if (seenE0 && expectedContinuation == 2 && b < 0xA0)
+            {
                 return false;
             }
-            if (seenED && expectedContinuation == 2 && b > 0x9F) {
+            if (seenED && expectedContinuation == 2 && b > 0x9F)
+            {
                 return false;
             }
-            if (seenF0 && expectedContinuation == 3 && b < 0x90) {
+            if (seenF0 && expectedContinuation == 3 && b < 0x90)
+            {
                 return false;
             }
-            if (seenF4 && expectedContinuation == 3 && b > 0x8F) {
+            if (seenF4 && expectedContinuation == 3 && b > 0x8F)
+            {
                 return false;
             }
 
             --expectedContinuation;
-            if (expectedContinuation == 0) {
+            if (expectedContinuation == 0)
+            {
                 seenE0 = seenED = seenF0 = seenF4 = false;
             }
         }
@@ -103,7 +120,7 @@ bool Utf8Validator::validateChunk(const uint8_t* data, size_t len) {
 
 /**
  * \brief Final validation check for UTF-8 stream completeness.
- * 
+ *
  * \return true if the stream ended on a complete code point (no pending continuation bytes),
  *         false if an incomplete multi-byte sequence was truncated
  *
@@ -112,7 +129,8 @@ bool Utf8Validator::validateChunk(const uint8_t* data, size_t len) {
  * - The stream ended on a complete code point boundary
  * - Equivalent to checking expectedContinuation == 0
  */
-bool Utf8Validator::validateFinal() const {
+bool Utf8Validator::validateFinal() const
+{
     return expectedContinuation == 0;
 }
 
@@ -124,7 +142,8 @@ bool Utf8Validator::validateFinal() const {
  * - Any recorded special case flags (F4, ED, etc.)
  * - Prepares the validator for a new UTF-8 validation session
  */
-void Utf8Validator::reset() {
+void Utf8Validator::reset()
+{
     expectedContinuation = 0;
     seenE0 = seenED = seenF0 = seenF4 = false;
 }

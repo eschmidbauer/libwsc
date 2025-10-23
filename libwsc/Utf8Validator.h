@@ -8,15 +8,16 @@
 #include <cstdint>
 #include <cstddef>
 
-class Utf8Validator {
+class Utf8Validator
+{
 public:
     Utf8Validator();
-    bool validateChunk(const uint8_t* data, size_t len);
+    bool validateChunk(const uint8_t *data, size_t len);
     bool validateFinal() const;
     void reset();
 
 private:
-    int  expectedContinuation;
+    int expectedContinuation;
     bool seenE0;
     bool seenED;
     bool seenF0;

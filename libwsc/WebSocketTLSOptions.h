@@ -14,11 +14,12 @@
  * \details Provides TLS configuration options including certificate files,
  * cipher suites, and validation settings for secure WebSocket connections (wss://).
  */
-struct WebSocketTLSOptions {
-    std::string certFile; ///< Path to client certificate file (PEM format)
-    std::string keyFile; ///< Path to private key file (PEM format)
-    std::string caFile = "SYSTEM"; ///< CA bundle path ("SYSTEM" for OS trust store, "NONE" to disable verification)
-    std::string ciphers = "DEFAULT"; ///< Custom cipher suite string or "DEFAULT" for secure defaults
+struct WebSocketTLSOptions
+{
+    std::string certFile;                   ///< Path to client certificate file (PEM format)
+    std::string keyFile;                    ///< Path to private key file (PEM format)
+    std::string caFile = "SYSTEM";          ///< CA bundle path ("SYSTEM" for OS trust store, "NONE" to disable verification)
+    std::string ciphers = "DEFAULT";        ///< Custom cipher suite string or "DEFAULT" for secure defaults
     bool disableHostnameValidation = false; ///< If true, skips hostname verification
 
     /**
@@ -31,7 +32,8 @@ struct WebSocketTLSOptions {
      * - Includes fallbacks for compatibility
      * - Excludes known weak ciphers (RC4, 3DES, etc.)
      */
-    static const std::string& getDefaultCiphers() {
+    static const std::string &getDefaultCiphers()
+    {
         static const std::string DEFAULT_CIPHERS =
             "ECDHE-ECDSA-AES128-GCM-SHA256:"
             "ECDHE-ECDSA-AES256-GCM-SHA384:"
@@ -59,7 +61,8 @@ struct WebSocketTLSOptions {
      * \brief Check if both certificate and key are configured
      * \return true if both certFile and keyFile are non-empty
      */
-    bool hasCertAndKey() const {
+    bool hasCertAndKey() const
+    {
         return !certFile.empty() && !keyFile.empty();
     }
 
@@ -67,7 +70,8 @@ struct WebSocketTLSOptions {
      * \brief Check if using system CA trust store
      * \return true if caFile is "SYSTEM" or empty
      */
-    bool isUsingSystemCA() const {
+    bool isUsingSystemCA() const
+    {
         return caFile == "SYSTEM" || caFile.empty();
     }
 
@@ -76,7 +80,8 @@ struct WebSocketTLSOptions {
      * \return true if caFile is "NONE"
      * \warning Disabling peer verification compromises security
      */
-    bool isPeerVerifyDisabled() const {
+    bool isPeerVerifyDisabled() const
+    {
         return caFile == "NONE";
     }
 
@@ -84,7 +89,8 @@ struct WebSocketTLSOptions {
      * \brief Check if using custom CA bundle
      * \return true if using non-system, non-disabled CA file
      */
-    bool isUsingCustomCA() const {
+    bool isUsingCustomCA() const
+    {
         return !isUsingSystemCA() && !isPeerVerifyDisabled();
     }
 
@@ -92,7 +98,8 @@ struct WebSocketTLSOptions {
      * \brief Check if using default cipher suite
      * \return true if ciphers is empty or "DEFAULT"
      */
-    bool isUsingDefaultCiphers() const {
+    bool isUsingDefaultCiphers() const
+    {
         return ciphers.empty() || ciphers == "DEFAULT";
     }
 };
