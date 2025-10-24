@@ -231,10 +231,12 @@ void WebSocketClient::connect()
         return;
     }
 
+    const int bev_options = BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_THREADSAFE;
+
     if (secure)
     {
 #ifdef USE_TLS
-        m_bev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
+        m_bev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_CONNECTING, bev_options);
         if (!m_bev)
         {
             log_error("Failed to create secure bufferevent");
@@ -246,7 +248,7 @@ void WebSocketClient::connect()
     }
     else
     {
-        m_bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_THREADSAFE);
+        m_bev = bufferevent_socket_new(base, -1, bev_options);
         if (!m_bev)
         {
             log_error("Failed to create bufferevent");
